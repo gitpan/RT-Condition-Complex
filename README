@@ -21,6 +21,23 @@ DESCRIPTION
     program in perl, some complex things have to be programmed, but now then
     can be reused.
 
+INSTALLATION
+    Since version 0.02 this extension depends on RT::Extension::ColumnMap,
+    first of all install it.
+
+        # install RT::Extension::ColumnMap
+
+        perl Makefile.PL
+        make
+        make install
+
+        # in RT_SiteConfig.pm
+        Set( @Plugins,
+            ... more plugin ...
+            RT::Extension::ColumnMap
+            RT::Condition::Complex
+        );
+
 HOW TO USE
     You open the web interface in a browser, goto configuration, the global
     or to specific queue and then scrips. Create a new scrip, on the
@@ -57,11 +74,12 @@ HOW TO USE
     ends with, not ends with.
 
   Fields
-    At this moment not many fields are available, but it's easy to add more.
-    Patches are welcome. Here is the list:
+    Fields are based on RT::Extension::ColumnMap. At this moment not many
+    fields are available, but it's easy to add more. Patches for the
+    RT::Extension::ColumnMap are welcome.
 
-    Type, Field, OldValue and NewValue - basic properties of the current
-    transaction.
+    The current transaction has no prefix, so 'Type' is type of the current
+    transaction. 'Ticket.' is prefix for the current ticket.
 
   Constants
     Constant is a number or a quoted string. Strings can be quoted using '
