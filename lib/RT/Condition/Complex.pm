@@ -4,7 +4,7 @@ use 5.008003;
 use strict;
 use warnings;
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 use base 'RT::Condition';
 
@@ -170,54 +170,62 @@ my %op_handler = (
 
 sub IsApplicable {
     my $self = shift;
-    my ($tree, @errors) = $self->ParseCode;
-    unless ( $tree ) {
-        $RT::Logger->error(
-            "Couldn't parse complex condition, errors:\n"
-            . join("\n", map "\t* $_", @errors)
-            . "\nCODE:\n"
-            . $self->ScripObj->CustomIsApplicableCode
-        );
-        return 0;
-    }
-    return $self->Solve( $tree );
+
+    return ($self->Solve(
+        ''     => $self->TransactionObj,
+        Ticket => $self->TicketObj,
+        @_,
+    ))[0];
 }
 
 my $solver = sub {
     my $cond = shift;
-    my $self = $_[0];
+    my $self = shift;
+    my $res;
     if ( $cond->{'op'} ) {
-        return $self->SolveCondition(
-            Field       => $cond->{'lhs'},
-            Operator    => $cond->{'op'},
-            Value       => $self->GetValue( $cond->{'rhs'}, @_ ),
-            Transaction => $_[1],
-            Ticket      => $_[2],
+        $res = $self->SolveCondition(
+            Field     => $cond->{'lhs'},
+            Operator  => $cond->{'op'},
+            Value     => $self->GetValue( $cond->{'rhs'}, @_ ),
+            Arguments => \@_,
         );
     }
     elsif ( $cond->{'module'} ) {
         my $module = 'RT::Condition::'. $cond->{'module'};
         eval "require $module;1" || die "Require of $module failed.\n$@\n";
+        my %rest = @_;
         my $obj = $module->new (
-            TransactionObj => $_[1],
-            TicketObj      => $_[2],
+            TransactionObj => $rest{'Transaction'},
+            TicketObj      => $rest{'Ticket'},
             Argument       => $cond->{'argument'},
             CurrentUser    => $RT::SystemUser,
         );
-        return $obj->IsApplicable;
+        $res = $obj->IsApplicable;
     } else {
         die "Boo";
     }
+    return undef unless $res;
+    return $res;
 };
 
 sub Solve {
     my $self = shift;
-    my $tree = shift;
+    my %args = @_%2? (Tree => @_) : (@_);
 
-    my $txn = $self->TransactionObj;
-    my $ticket = $self->TicketObj;
+    my ($tree, @errors) = $self->ParseCode( $args{'Tree'} );
+    unless ( $tree ) {
+        $RT::Logger->error(
+            "Couldn't parse complex condition, errors:\n"
+            . join("\n", map "\t* $_", @errors)
+            . "\nCODE:\n" . $args{'Tree'}
+        );
+        return 0;
+    }
 
-    return $parser->solve( $tree, $solver, $self, $txn, $ticket );
+    my $solution = $parser->partial_solve( $tree, $solver, $self, %args );
+    return $solution unless ref $solution;
+
+    return (0, $solution, $self->DescribeTree( $solution ));
 }
 
 sub SolveCondition {
@@ -227,21 +235,93 @@ sub SolveCondition {
     my $op_handler = $self->OpHandler( $args{'Operator'} );
     my $value = $args{'Value'};
     my $checker = sub { return $op_handler->( $_[0], $value ) };
-    
+
     return RT::Extension::ColumnMap->Check(
-        String => $args{'Field'},
-        Objects => {
-            '' => $args{'Transaction'},
-            'Ticket' => $args{'Ticket'},
-        },
+        String  => $args{'Field'},
+        Objects => { @{ $args{'Arguments'} } },
         Checker => $checker,
     );
 }
 
+sub DescribeTree {
+    my $self = shift;
+    my $tree = shift;
+
+    my $res = '';
+    $parser->walk(
+        $tree,
+        {
+            open_paren  => sub { $res .= '(' },
+            close_paren => sub { $res .= ')' },
+            operator    => sub { $res .= ' '. $_[1]->loc($_[0]) .' ' },
+            operand     => sub { 
+                my $cond = shift;
+                my $self = shift;
+                my $str = '';
+                if ( $cond->{'op'} ) {
+                    my $qv = $cond->{'rhs'};
+                    if ( $cond->{'op'} eq '=' ) {
+                        $str = $self->loc('[_1] is equal to [_2]', $cond->{'lhs'}, $qv);
+                    }
+                    elsif ( $cond->{'op'} eq '!=' ) {
+                        $str = $self->loc('[_1] is not equal to [_2]', $cond->{'lhs'}, $qv);
+                    }
+                    elsif ( $cond->{'op'} eq '>' ) {
+                        $str = $self->loc('[_1] is greater than [_2]', $cond->{'lhs'}, $qv);
+                    }
+                    elsif ( $cond->{'op'} eq '>=' ) {
+                        $str = $self->loc('[_1] is equal or greater than [_2]', $cond->{'lhs'}, $qv);
+                    }
+                    elsif ( $cond->{'op'} eq '<' ) {
+                        $str = $self->loc('[_1] is smaller than [_2]', $cond->{'lhs'}, $qv);
+                    }
+                    elsif ( $cond->{'op'} eq '<=' ) {
+                        $str = $self->loc('[_1] is smaller or greater than [_2]', $cond->{'lhs'}, $qv);
+                    }
+                    elsif ( $cond->{'op'} eq 'contains' ) {
+                        $str = $self->loc('[_1] contains [_2]', $cond->{'lhs'}, $qv);
+                    }
+                    elsif ( $cond->{'op'} eq 'not contains' ) {
+                        $str = $self->loc("[_1] doesn't contain [_2]", $cond->{'lhs'}, $qv);
+                    }
+                    elsif ( $cond->{'op'} eq 'starts with' ) {
+                        $str = $self->loc('[_1] starts with [_2]', $cond->{'lhs'}, $qv);
+                    }
+                    elsif ( $cond->{'op'} eq 'not starts with' ) {
+                        $str = $self->loc("[_1] doesn't start with [_2]", $cond->{'lhs'}, $qv);
+                    }
+                    elsif ( $cond->{'op'} eq 'ends with' ) {
+                        $str = $self->loc('[_1] ends with [_2]', $cond->{'lhs'}, $qv);
+                    }
+                    elsif ( $cond->{'op'} eq 'not ends with' ) {
+                        $str = $self->loc("[_1] doesn't end with [_2]", $cond->{'lhs'}, $qv);
+                    }
+                    elsif ( $cond->{'op'} eq 'is null' ) {
+                        $str = $self->loc('[_1] is empty', $cond->{'lhs'});
+                    }
+                    elsif ( $cond->{'op'} eq 'is not null' ) {
+                        $str = $self->loc('[_1] is not empty', $cond->{'lhs'});
+                    }
+                    else {
+                        $str = $self->loc("[_1] $cond->{op} [_2]", $cond->{'lhs'}, $qv);
+                    }
+                } else {
+                }
+                $res .= $str;
+            },
+        },
+        $self
+    );
+    return $res;
+}
+
 sub ParseCode {
     my $self = shift;
+    my $code = shift;
+    return $code if ref $code;
 
-    my $code = $self->ScripObj->CustomIsApplicableCode;
+    $code = $self->ScripObj->CustomIsApplicableCode
+        unless defined $code;
 
     my @errors = ();
     my $res = $parser->as_array(
